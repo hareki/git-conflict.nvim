@@ -258,7 +258,9 @@ end
 ---@param lnum integer
 ---@return integer extmark id
 local function draw_section_label(bufnr, hl_group, label, lnum)
-  local remaining_space = api.nvim_win_get_width(0) - api.nvim_strwidth(label)
+  local winid = fn.bufwinid(bufnr)
+  if winid == -1 then winid = 0 end
+  local remaining_space = api.nvim_win_get_width(winid) - api.nvim_strwidth(label)
   return api.nvim_buf_set_extmark(bufnr, NAMESPACE, lnum, 0, {
     hl_group = hl_group,
     virt_text = { { label .. string.rep(' ', remaining_space), hl_group } },
@@ -425,7 +427,11 @@ local function parse_buffer(bufnr, range_start, range_end)
   end
   if prev_conflicts ~= has_conflict or not vim.b[bufnr].conflict_mappings_set then
     local pattern = has_conflict and 'GitConflictDetected' or 'GitConflictResolved'
-    api.nvim_exec_autocmds('User', { pattern = pattern })
+    api.nvim_exec_autocmds('User', {
+      pattern = pattern,
+      modeline = false,
+      data = { buf = bufnr },
+    })
   end
 end
 
@@ -685,8 +691,9 @@ function M.setup(user_config)
   api.nvim_create_autocmd('User', {
     group = AUGROUP_NAME,
     pattern = 'GitConflictDetected',
-    callback = function()
-      local bufnr = api.nvim_get_current_buf()
+    callback = function(args)
+      local bufnr = (args.data and args.data.buf) or api.nvim_get_current_buf()
+      if not api.nvim_buf_is_valid(bufnr) then return end
       if config.disable_diagnostics then vim.diagnostic.disable(bufnr) end
       if config.default_mappings then setup_buffer_mappings(bufnr) end
     end,
@@ -695,8 +702,9 @@ function M.setup(user_config)
   api.nvim_create_autocmd('User', {
     group = AUGROUP_NAME,
     pattern = 'GitConflictResolved',
-    callback = function()
-      local bufnr = api.nvim_get_current_buf()
+    callback = function(args)
+      local bufnr = (args.data and args.data.buf) or api.nvim_get_current_buf()
+      if not api.nvim_buf_is_valid(bufnr) then return end
       if config.disable_diagnostics then vim.diagnostic.enable(bufnr) end
       if config.default_mappings then clear_buffer_mappings(bufnr) end
     end,
