@@ -204,7 +204,8 @@ end
 ---@param dir string?
 ---@param callback fun(files: table<string, integer[]>, string)
 local function get_conflicted_files(dir, callback)
-  local cmd = { 'git', '-C', dir, 'diff', ('--line-prefix=%s%s'):format(dir, sep), '--name-only', '--diff-filter=U' }
+  -- diff-files never takes .git/index.lock (git diff does), so a fetch cannot retrigger the watcher
+  local cmd = { 'git', '-C', dir, 'diff-files', ('--line-prefix=%s%s'):format(dir, sep), '--name-only', '--diff-filter=U' }
   job(cmd, function(data)
     local files = {}
     for _, filename in ipairs(data) do
@@ -443,17 +444,37 @@ end
 --- a different repository in which case extmarks could be cleared for unrelated projects
 local function fetch_conflicts(buf)
   buf = (buf and api.nvim_buf_is_valid(buf)) and buf or api.nvim_get_current_buf()
-  get_git_root(fn.fnamemodify(api.nvim_buf_get_name(buf), ':h'), function(git_root)
+  local bufname = api.nvim_buf_get_name(buf)
+  -- A terminal (e.g. lazygit) or another special buffer names no directory: use the cwd, whose
+  -- .git is the one being watched
+  local dir = fn.getcwd()
+  if vim.bo[buf].buftype == '' and bufname ~= '' then dir = fn.fnamemodify(bufname, ':h') end
+  get_git_root(dir, function(git_root)
+    -- Outside a repository, the empty prefix would match (and drop) every buffer below
+    if not git_root or git_root == '' then return end
     get_conflicted_files(git_root, function(files, repo)
+      local resolved = {}
       for name, b in pairs(visited_buffers) do
         -- FIXME: this will not work for nested repositories
-        if vim.startswith(name, repo) and not files[name] and b.bufnr then
+        if vim.startswith(name, repo .. sep) and not files[name] and b.bufnr then
           visited_buffers[name] = nil
           M.clear(b.bufnr)
+          if b.positions ~= nil and #b.positions > 0 then resolved[#resolved + 1] = b.bufnr end
         end
       end
       for path, _ in pairs(files) do
         visited_buffers[path] = visited_buffers[path] or {}
+      end
+      -- Git no longer lists these as unmerged (e.g. after git merge --abort). Notify listeners
+      -- after the traversal, since their handlers may add entries to visited_buffers
+      for _, bufnr in ipairs(resolved) do
+        if api.nvim_buf_is_valid(bufnr) then
+          api.nvim_exec_autocmds('User', {
+            pattern = 'GitConflictResolved',
+            modeline = false,
+            data = { buf = bufnr },
+          })
+        end
       end
     end)
   end)
@@ -505,8 +526,17 @@ local function process(bufnr, range_start, range_end)
   if not is_enabled(bufnr) then
     M.clear(bufnr)
     clear_buffer_mappings(bufnr)
-    local name = api.nvim_buf_get_name(bufnr)
-    if name ~= '' then visited_buffers[name] = nil end
+    -- Keep tracking the buffer but forget its conflicts: listeners undo their state now, and the
+    -- first parse once cond holds again detects them anew
+    local entry = visited_buffers[bufnr]
+    if entry and entry.positions ~= nil and #entry.positions > 0 then
+      entry.positions, entry.tick = {}, nil
+      api.nvim_exec_autocmds('User', {
+        pattern = 'GitConflictResolved',
+        modeline = false,
+        data = { buf = bufnr },
+      })
+    end
     return
   end
 
