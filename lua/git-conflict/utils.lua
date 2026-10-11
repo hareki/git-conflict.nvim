@@ -28,20 +28,34 @@ function M.job(cmd, callback)
   })
 end
 
----Only call the passed function once every timeout in ms
+---Only call the passed function once every timeout in ms. The last call made in the meantime
+---runs once the timeout ends, so the final state after a burst of changes is never missed
 ---@param timeout integer
 ---@param func function
 ---@return function
 function M.throttle(timeout, func)
   local timer = vim.loop.new_timer()
   local running = false
-  return function(...)
-    if not running then
-      func(...)
-      running = true
-      timer:start(timeout, 0, function() running = false end)
+  local pending
+  local function throttled(...)
+    if running then
+      pending = { n = select('#', ...), ... }
+      return
     end
+    func(...)
+    running = true
+    timer:start(timeout, 0, function()
+      running = false
+      if not pending then return end
+      local args = pending
+      pending = nil
+      vim.schedule(function()
+        -- A call made since the timeout ended has already seen the latest state
+        if not running then throttled(unpack(args, 1, args.n)) end
+      end)
+    end)
   end
+  return throttled
 end
 
 ---Wrapper around `api.nvim_buf_get_lines` which defaults to the current buffer
